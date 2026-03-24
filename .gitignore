@@ -12,12 +12,6 @@
 .idea/**/dictionaries
 .idea/**/shelf
 
-# IntelliJ IDEA / JetBrains
-.idea/
-stuttgart_s_bahn.iml
-# Optional: Falls man manche Konfigurationen doch teilen möchte,
-# aber den Rest ignorieren will, kann man Ausnahmen definieren:
-# !.idea/runConfigurations/
 
 
 # AWS User-specific
