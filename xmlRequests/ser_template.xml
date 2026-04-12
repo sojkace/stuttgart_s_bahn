@@ -13,8 +13,13 @@
                     </LocationRef>
                 </Location>
                 <Params>
+                    <NumberOfResults>20</NumberOfResults>
                     <StopEventType>departure</StopEventType>
                     <IncludeRealtimeData>true</IncludeRealtimeData>
+                    <PtModeFilter>
+                        <Exclude>false</Exclude>
+                        <RailSubmode>suburbanRailway</RailSubmode>
+                    </PtModeFilter>
                 </Params>
             </StopEventRequest>
         </RequestPayload>

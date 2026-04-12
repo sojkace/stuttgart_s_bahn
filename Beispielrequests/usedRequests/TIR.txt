@@ -2,7 +2,7 @@
 <Trias version="1.2" xmlns="http://www.vdv.de/trias" xmlns:siri="http://www.siri.org.uk/siri">
     <ServiceRequest>
         <siri:RequestTimestamp>2026-04-11T21:00:00Z</siri:RequestTimestamp>
-        <siri:RequestorRef>ceDRiC-SoJKa</siri:RequestorRef>
+        <siri:RequestorRef>xxx</siri:RequestorRef>
         <RequestPayload>
             <TripInfoRequest>
                 <JourneyRef>ddb:92T06::H:j26:164</JourneyRef>

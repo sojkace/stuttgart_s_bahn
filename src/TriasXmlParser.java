@@ -4,6 +4,7 @@ import org.w3c.dom.NodeList;
 
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.File;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -16,11 +17,11 @@ public class TriasXmlParser {
      * Liest die SER-XML-Datei und gibt eine Liste von S-Bahnen zurück.
      * (Zustand und nächste Station sind hier noch leer, die füllen wir später via TIR).
      */
-    public static List<Train> parseSerResponse(String xmlText) {
+    public static List<TrainIdentifier> parseSerResponse(String xmlText) {
 
         // System.out.println(xmlText);
 
-        List<Train> foundTrains = new ArrayList<>();
+        List<TrainIdentifier> foundTrains = new ArrayList<>();
 
         try {
             ByteArrayInputStream inputStream = new ByteArrayInputStream(xmlText.getBytes(StandardCharsets.UTF_8));
@@ -39,29 +40,29 @@ public class TriasXmlParser {
                 NodeList submodeNodes = event.getElementsByTagName("trias:RailSubmode");
                 if (submodeNodes.getLength() > 0 && "suburbanRailway".equals(submodeNodes.item(0).getTextContent())) {
 
-                    Train train = new Train();
-
                     // 1. ID (JourneyRef)
+                    String newTrainJourneyRef = "xxx";
                     NodeList idNodes = event.getElementsByTagName("trias:JourneyRef");
-                    if (idNodes.getLength() > 0) train.setId(idNodes.item(0).getTextContent());
+                    if (idNodes.getLength() > 0) {
+                        newTrainJourneyRef = idNodes.item(0).getTextContent();
+                    } else {
+                        System.out.println("JourneyRef problem by radar search");
+                    }
 
                     // System.out.print("[Debug] Train s-bahn found: " + train.getId());
 
                     // 2. Datum (OperatingDayRef - wichtig für den TIR später)
+                    String newTrainOperatingDayRef = "xxx";
                     NodeList dateNodes = event.getElementsByTagName("trias:OperatingDayRef");
-                    if (dateNodes.getLength() > 0) train.setOperatingDayRef(dateNodes.item(0).getTextContent());
+                    if (dateNodes.getLength() > 0) {
+                        newTrainOperatingDayRef = dateNodes.item(0).getTextContent();
+                    } else {
+                        System.out.println("OperatingDayRef problem by radar search");
+                    }
 
-                    // 3. Texte extrahieren
-                    train.setLine(extractNestedText(event, "trias:PublishedLineName"));
-                    train.setDirection(extractNestedText(event, "trias:DestinationText"));
-
-
-                    // Vorerst leere Felder (werden durch TIR und Logik gefüllt)
-                    train.setState("unknown");
-                    train.setNextStation("unknown");
 
                     // Zug zur Liste hinzufügen
-                    foundTrains.add(train);
+                    foundTrains.add(new TrainIdentifier(newTrainJourneyRef, newTrainOperatingDayRef));
                 }
             }
         } catch (Exception e) {
@@ -74,70 +75,121 @@ public class TriasXmlParser {
     /**
      * Liest die TIR-XML-Antwort und füllt die nächste Station in das Train-Objekt.
      */
-    public static void parseTirAndUpdateTrain(String xmlText, Train train) {
+    public static Train parseTirResponse(String xmlText) {
+        Train train = new Train();
         try {
+            // System.out.println(xmlText);
             java.io.ByteArrayInputStream inputStream = new java.io.ByteArrayInputStream(xmlText.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             org.w3c.dom.Document document = javax.xml.parsers.DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(inputStream);
             document.getDocumentElement().normalize();
 
             Instant now = Instant.now();
 
-            // Wir schauen uns NUR die OnwardCalls (kommende und aktuelle Halte) an.
-            // Die API sortiert diese Liste chronologisch. Das erste Element in der Zukunft
-            // ist unsere nächste Station. Das Element davor ist die letzte/aktuelle Station.
+            // --------------------------------------------------------
+            // NEU: Allgemeine Zug-Metadaten aus dem <trias:Service> Block auslesen
+            // --------------------------------------------------------
+            NodeList serviceNodes = document.getElementsByTagName("trias:Service");
+            if (serviceNodes.getLength() > 0) {
+                Element serviceElement = (Element) serviceNodes.item(0);
+
+                // 1. ID (JourneyRef)
+                NodeList journeyRefNodes = serviceElement.getElementsByTagName("trias:JourneyRef");
+                if (journeyRefNodes.getLength() > 0) {
+                    train.setId(journeyRefNodes.item(0).getTextContent());
+                }
+
+                // 2. OperatingDayRef
+                NodeList opDayNodes = serviceElement.getElementsByTagName("trias:OperatingDayRef");
+                if (opDayNodes.getLength() > 0) {
+                    train.setOperatingDayRef(opDayNodes.item(0).getTextContent());
+                }
+
+                // 3. Linie (z.B. "S1") - Nutzt deine Hilfsmethode!
+                train.setLine(extractNestedText(serviceElement, "trias:PublishedLineName"));
+
+                // 4. Richtung/Ziel (z.B. "Kirchheim (T)") - Nutzt deine Hilfsmethode!
+                train.setDirection(extractNestedText(serviceElement, "trias:DestinationText"));
+            }
+            // --------------------------------------------------------
+
+            // Beide Listen auslesen
+            NodeList previousCalls = document.getElementsByTagName("trias:PreviousCall");
             NodeList onwardCalls = document.getElementsByTagName("trias:OnwardCall");
 
-            for (int i = 0; i < onwardCalls.getLength(); i++) {
-                Element call = (Element) onwardCalls.item(i);
+            int prevCount = previousCalls.getLength();
+            int onwardCount = onwardCalls.getLength();
 
-                // Ankunfts- und Abfahrtszeiten an DIESER Station suchen
-                Instant arrivalTime = extractTimeFromCall(call, "trias:ServiceArrival");
-                Instant departureTime = extractTimeFromCall(call, "trias:ServiceDeparture");
-                String stationName = extractNestedText(call, "trias:StopPointName");
-
-                // Fallback: Manchmal fehlt die Ankunft (erste Station) oder Abfahrt (letzte Station)
-                Instant timeToCompare = (arrivalTime != null) ? arrivalTime : departureTime;
-
-                // Logik: Ist dieser Halt in der Zukunft?
-                if (timeToCompare != null && timeToCompare.isAfter(now)) {
-
-                    // Wir haben die NÄCHSTE Station in der Zukunft gefunden!
-                    train.setNextStation(stationName);
-                    train.setArrivalTime(arrivalTime); // Ankunft an der Zielstation
-
-                    // Wenn es einen Halt DAVOR in der Liste gibt, ist das unsere AKTUELLE/LETZTE Station
-                    if (i > 0) {
-                        Element previousCall = (Element) onwardCalls.item(i - 1);
-                        train.setStation(extractNestedText(previousCall, "trias:StopPointName"));
-                        train.setDepartureTime(extractTimeFromCall(previousCall, "trias:ServiceDeparture"));
-                    } else {
-                        // Wenn es das allererste Element ist, steht der Zug noch an der Startstation
-                        train.setStation(stationName);
-                        train.setDepartureTime(departureTime);
-                    }
-
-                    break; // Wir haben gefunden, wo wir auf dem Zeitstrahl sind -> Abbruch!
-                }
+            // FALL 1: Zug hat sein Ziel erreicht (Es gibt keine Zukunft mehr)
+            if (onwardCount == 0) {
+                return null;
             }
 
-            // 3. ZUSTAND BERECHNEN (Deine Logik aus dem Konzept!)
-            if (train.getDepartureTime() != null && train.getArrivalTime() != null) {
-                if (now.isBefore(train.getDepartureTime())) {
-                    train.setState("station");
-                } else if ((now.equals(train.getDepartureTime()) || now.isAfter(train.getDepartureTime()))
-                        && now.isBefore(train.getArrivalTime())) {
-                    train.setState("between");
-                } else {
-                    train.setState("station");
+            // FALL 2: Zug ist noch nicht abgefahren (Es gibt keine Vergangenheit)
+            if (prevCount == 0) {
+                Element firstOnward = (Element) onwardCalls.item(0);
+
+                // Wir lesen die Abfahrtszeit erst in eine lokale Variable, um sie zu prüfen
+                Instant departureTime = extractTimeFromCall(firstOnward, "trias:ServiceDeparture");
+
+                // --- NEU: DER 5-MINUTEN FILTER ---
+                if (departureTime != null) {
+                    Instant inFiveMinutes = now.plus(Duration.ofMinutes(8));
+
+                    if (departureTime.isAfter(inFiveMinutes)) {
+                        // Die Abfahrt liegt weiter als 5 Minuten in der Zukunft.
+                        // Wir geben false/null zurück -> Zug wird nicht aufs Frontend geschickt!
+                        return null; // (bzw. return false; falls deine Methode boolean zurückgibt)
+                    }
                 }
-            } else {
-                // Fallback, falls Zeiten fehlen
-                train.setState("station");
+
+                // Wenn der Zug den Filter bestanden hat, speichern wir die Daten im Objekt
+                train.setStation(extractNestedText(firstOnward, "trias:StopPointName"));
+                train.setDepartureTime(departureTime);
+
+                // Gibt es schon eine zweite Station für die Vorschau?
+                if (onwardCount > 1) {
+                    Element secondOnward = (Element) onwardCalls.item(1);
+                    train.setNextStation(extractNestedText(secondOnward, "trias:StopPointName"));
+                    train.setArrivalTime(extractTimeFromCall(secondOnward, "trias:ServiceArrival"));
+                }
+
+                train.setState("station"); // Steht logischerweise am Start
+            }
+            // FALL 3: Zug ist unterwegs (Er hat eine Vergangenheit und eine Zukunft)
+            else {
+                // Letzte Station der Vergangenheit
+                Element lastPrevious = (Element) previousCalls.item(prevCount - 1);
+                // Erste Station der Zukunft
+                Element firstOnward = (Element) onwardCalls.item(0);
+
+                train.setStation(extractNestedText(lastPrevious, "trias:StopPointName"));
+                train.setDepartureTime(extractTimeFromCall(lastPrevious, "trias:ServiceDeparture"));
+
+                train.setNextStation(extractNestedText(firstOnward, "trias:StopPointName"));
+                train.setArrivalTime(extractTimeFromCall(firstOnward, "trias:ServiceArrival"));
+
+                train.setState("between"); // Zug ist strukturell auf der Strecke
+
+                // --- DEINE GEWÜNSCHTE ZEIT-VALIDIERUNG FÜRS TERMINAL ---
+                Instant dep = train.getDepartureTime();
+                Instant arr = train.getArrivalTime();
+
+                if (dep != null && arr != null) {
+                    if (now.isBefore(dep)) {
+                        System.out.println("⚠️ WARNUNG: API sagt Zug ist zwischen " + train.getStation() +
+                                " und " + train.getNextStation() + ", aber aktuelle Zeit ist VOR der Abfahrt! (API-Lag?)");
+                    } else if (now.isAfter(arr)) {
+                        System.out.println("⚠️ WARNUNG: Zug auf dem Weg nach " + train.getNextStation() +
+                                " sollte schon da sein! (Zug verspätet sich oder API hängt)");
+                    }
+                }
             }
 
         } catch (Exception e) {
             System.out.println("Fehler beim Parsen der TIR: " + e.getMessage());
         }
+
+        return train;
     }
 
     /**
@@ -147,9 +199,17 @@ public class TriasXmlParser {
         NodeList eventNodes = call.getElementsByTagName(arrivalOrDepartureTag);
         if (eventNodes.getLength() > 0) {
             Element eventElement = (Element) eventNodes.item(0);
-            NodeList timeNodes = eventElement.getElementsByTagName("trias:TimetabledTime");
-            if (timeNodes.getLength() > 0) {
-                return Instant.parse(timeNodes.item(0).getTextContent());
+
+            // 1. PRIORITÄT: Wir suchen zuerst nach der Echtzeit (Verspätung)!
+            NodeList estimatedNodes = eventElement.getElementsByTagName("trias:EstimatedTime");
+            if (estimatedNodes.getLength() > 0) {
+                return Instant.parse(estimatedNodes.item(0).getTextContent());
+            }
+
+            // 2. FALLBACK: Nur wenn es keine Echtzeit gibt, nehmen wir den Fahrplan
+            NodeList timetabledNodes = eventElement.getElementsByTagName("trias:TimetabledTime");
+            if (timetabledNodes.getLength() > 0) {
+                return Instant.parse(timetabledNodes.item(0).getTextContent());
             }
         }
         return null;
